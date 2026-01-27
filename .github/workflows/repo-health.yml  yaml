@@ -1,0 +1,47 @@
+name: Repo Health Check
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  repo-health:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PowerShell
+        uses: PowerShell/PowerShell@v1
+        with:
+          pwsh-version: '7.4.x'
+
+      - name: Run Repo Health Checker
+        shell: pwsh
+        run: |
+          Import-Module "$PWD/RepoHealthChecker.psm1" -Force
+
+          $reportDir = Join-Path $PWD 'reports'
+          if (-not (Test-Path $reportDir)) {
+            New-Item -Path $reportDir -ItemType Directory | Out-Null
+          }
+
+          $reportPath = Join-Path $reportDir 'RepoHealthReport.html'
+
+          $result = Invoke-RhcRepoHealthCheck -Path $PWD -HtmlReportPath $reportPath
+
+          Write-Host "Overall Score: $($result.Score.TotalScore)% ($($result.Score.LetterGrade))"
+
+          if ($result.Score.TotalScore -lt 70) {
+            Write-Error "Repo health score below threshold."
+          }
+
+      - name: Upload HTML report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo-health-report
+          path: reports/RepoHealthReport.html
