@@ -1,74 +1,54 @@
-# PowerShell Security & Automation Toolkit  
-### By Scott Malin — Cybersecurity & Automation Engineer  
+<p align="center">
+  <img src="BANNER_PowerShell-Security-Toolkit.png" width="85%" alt="PowerShell Security Toolkit Banner">
+</p>
 
-![PowerShell](https://img.shields.io/badge/PowerShell-7+-blue)
-![Status](https://img.shields.io/badge/Status-Active-brightgreen)
-![License](https://img.shields.io/badge/License-MIT-lightgrey)
-![Maintainer](https://img.shields.io/badge/Maintainer-Scott%20Malin-blueviolet)
+<h1 align="center">PowerShell Security & Automation Toolkit</h1>
+<h3 align="center">By Scott Malin — Cybersecurity & Automation Architect</h3>
 
----
+<p align="center">
+Production‑ready PowerShell tools for AD security, endpoint diagnostics, and repo governance.
+</p>
 
-## Overview  
-This repository contains a curated collection of **production‑ready PowerShell tools** focused on **Active Directory security**, **privilege analysis**, **posture assessment**, and **repository health automation**.
-
-Each script is engineered with:
-
-- Clear documentation  
-- Deterministic behavior  
-- Admin‑friendly output  
-- Security‑focused logic  
-- Professional readability  
-
-This repo serves as both a **working toolkit** and a **portfolio showcase** of my engineering approach to automation, AD hygiene, and security posture improvement.
+<p align="center">
+  <img src="https://img.shields.io/badge/Last_Updated-2026--01--28-blue?style=for-the-badge">
+  <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge">
+  <img src="https://img.shields.io/badge/Category-PowerShell_Security-purple?style=for-the-badge">
+  <img src="https://img.shields.io/badge/Type-Operational_Toolkit-orange?style=for-the-badge">
+</p>
 
 ---
 
-## 📁 Repository Structure  
+# ⭐ Featured Script
 
-### **Active Directory Security Tools**
-
-#### **AD-PrivilegeAnalyzer.ps1**  
-Analyzes privilege drift, shadow admin exposure, and unintended privilege inheritance across AD. Produces a ranked list of high‑risk accounts and groups.
-
-#### **AD-Security-Posture-Scanner.ps1**  
-Performs a broad AD security posture review, checking for misconfigurations, weak delegation, insecure defaults, and hygiene issues.
-
-#### **Invoke-ADAttackPathShortener.ps1**  
-Builds a graph of group memberships and ACL rights to identify the **shortest privilege‑escalation path** from any user to Domain Admins. Outputs a ranked list of “most dangerous users.”
-
-#### **Invoke-ADLeastPrivilegeAdvisor.ps1**  
-Evaluates accounts, groups, and privileges to identify **unused access**, **stale memberships**, **unused groups**, and **service accounts with unnecessary logon rights**. Generates actionable least‑privilege recommendations.
+### AD-PrivilegeAnalyzer.ps1  
+**Goal:** Identify privilege drift and shadow admin exposure in Active Directory.
 
 ---
 
-### **Automation & Repo Health**
+# 📁 Repository Structure
 
-#### **RepoHealthChecker.psm1**  
-A PowerShell module that evaluates repository structure, documentation quality, file hygiene, and consistency. Useful for maintaining professional‑grade GitHub projects.
-
----
-
-### **Examples**
-
-#### **examples/**  
-Contains sample execution patterns and example runs for select tools.
+(Include your script catalog with goal statements.)
 
 ---
 
-### **GitHub Workflows**
+# 🕒 Version History / Changelog
 
-#### **.github/workflows/**  
-Automated health checks and CI tasks supporting repository quality and consistency.
+### v1.3 — January 2026  
+- Added Cyber Blue banner  
+- Unified README structure  
+- Featured script section added  
+- Cross‑repo links standardized
 
 ---
 
-## 🚀 Getting Started
+# 🔗 Cross‑Links
 
-### **Prerequisites**
-- Windows environment with PowerShell 5.1+ or PowerShell 7+  
-- RSAT tools installed for AD‑related scripts  
-- Appropriate AD read permissions (domain‑level recommended)
+- Cybersecurity Prompts → https://github.com/scottmalin68-commits/Cybersecurity-Prompts  
+- Misc Prompts → https://github.com/scottmalin68-commits/Misc-AI-Prompts  
+- Learning Games → https://github.com/scottmalin68-commits/Learning-Games-Prompts  
+- Profile → https://github.com/scottmalin68-commits
 
-### **Running a Script**
-```powershell
-.\ScriptName.ps1
+---
+
+# 📜 License  
+MIT License — see `LICENSE` for details.
