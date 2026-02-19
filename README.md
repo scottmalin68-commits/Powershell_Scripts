@@ -55,7 +55,7 @@ Additional folders:
 - Featured script section added  
 - Cross-repo links standardized
 
-### v1.4 — February 2026 (proposed)  
+### v1.4 — February 2026  
 - Filled in full script catalog with goal statements  
 - Improved repo description for discoverability  
 - Added dynamic stars badge  
