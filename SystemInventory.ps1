@@ -6,6 +6,8 @@
     a single JSON file for easy AI ingestion and system restoration.
 .AUTHOR
     Scott M.
+.Companion file 
+	System Rebuild Architect Engine.md at https://github.com/scottmalin68-commits/Misc-AI-Prompts/blob/main/System%20Rebuild%20Architect%20Engine.md
 .NOTES
     Version: 1.6
     Changelog:
