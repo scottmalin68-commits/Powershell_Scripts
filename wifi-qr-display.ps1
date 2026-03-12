@@ -3,36 +3,18 @@
 Display a Wi-Fi QR code for a network from a wifi-backup.ps1 backup.
 
 .DESCRIPTION
-This script reads a Wi-Fi backup folder created by wifi-backup.ps1,
-lists available networks, allows the user to select one, and generates
-a QR code for easy connection on mobile devices.
+Reads a Wi-Fi backup folder, parses the XML for credentials, 
+and generates a QR code via Google Chart API.
 
-It uses only built-in .NET libraries — no external DLLs are required.
-The QR code follows the standard format:
-
-    WIFI:T:<auth>;S:<SSID>;P:<password>;;
-
-Phones and tablets can scan this code to connect automatically.
-
-This is intended as a companion script to wifi-backup.ps1.
-
-.Author
+.AUTHOR
 Scott M.
 
+.CHANGELOG
+v1.0.0 (2026-03-12) - Initial version
+v1.1.0 (2026-03-12) - Added internet check, fixed loop syntax, and added Changelog
+
 .PARAMETER Path
-Path to the backup folder containing exported Wi-Fi profiles (XML files and manifest).
-
-.EXAMPLES
-
-Display QR code for a network:
-
-    .\wifi-showqr.ps1 -Path "C:\Users\Empire\WifiBackup_2026-03-12_19-15"
-
-The script will list available networks and let you choose one to display.
-
-.NOTES
-Requires Windows PowerShell 5.1 or later.
-No installation of external libraries needed.
+Path to the backup folder or ZIP file.
 #>
 
 param(
@@ -41,91 +23,86 @@ param(
 )
 
 # ---------------------------------------------------------
-# Validate Backup Folder
+# Validate Path & Internet
 # ---------------------------------------------------------
-
 if (-not (Test-Path $Path)) {
-    Write-Host "ERROR: Backup folder not found." -ForegroundColor Red
+    Write-Error "folder not found: $Path"
+    exit
+}
+
+# check for web access since we're using Google's API
+if (-not (Test-Connection -ComputerName google.com -Count 1 -Quiet)) {
+    Write-Error "this script needs internet to generate the QR code via Google API."
     exit
 }
 
 # ---------------------------------------------------------
-# List available Wi-Fi profiles
+# Get Profiles
 # ---------------------------------------------------------
+$profiles = Get-ChildItem -Path "$Path\*.xml"
 
-$profiles = Get-ChildItem "$Path\*.xml"
-
-if (-not $profiles) {
-    Write-Host "No Wi-Fi profiles found in backup folder."
+if ($profiles.Count -eq 0) {
+    Write-Warning "no wifi profiles found in $Path"
     exit
 }
 
-Write-Host "Available Networks:"
+Write-Host "`nAvailable Networks:" -ForegroundColor Cyan
 for ($i=0; $i -lt $profiles.Count; $i++) {
-    Write-Host ("[{0}] {1}" -f ($i+1), $profiles[$i].BaseName))
+    Write-Host ("[{0}] {1}" -f ($i+1), $profiles[$i].BaseName)
 }
 
 # ---------------------------------------------------------
-# User selects a network
+# Selection & Parsing
 # ---------------------------------------------------------
-
-$selection = Read-Host "Enter the number of the network to generate QR code"
-
+$selection = Read-Host "`nPick a number"
 if ($selection -lt 1 -or $selection -gt $profiles.Count) {
-    Write-Host "Invalid selection." -ForegroundColor Red
+    Write-Error "invalid choice."
     exit
 }
 
-$chosenProfile = [xml](Get-Content $profiles[$selection-1].FullName)
+[xml]$xml = Get-Content $profiles[$selection-1].FullName
 
-$ssid = $chosenProfile.WLANProfile.SSIDConfig.SSID.name
-$keyNode = $chosenProfile.WLANProfile.MSM.security.sharedKey
-$password = if ($keyNode) { $keyNode.keyMaterial } else { "" }
-$auth = $chosenProfile.WLANProfile.MSM.security.authEncryption.authentication
+# drill down into the XML schema
+$ns = @{ wlan = "http://www.microsoft.com/networking/WLAN/profile/v1" }
+$ssid = $xml.WLANProfile.SSIDConfig.SSID.name
+$auth = $xml.WLANProfile.MSM.security.authEncryption.authentication
+$pass = $xml.WLANProfile.MSM.security.sharedKey.keyMaterial
 
-# Map XML authentication types to QR code T: values
-switch ($auth) {
-    "WPA2PSK" { $authType = "WPA" }
-    "WPAPSK"  { $authType = "WPA" }
-    "open"    { $authType = "nopass" }
-    default   { $authType = "WPA" }
-}
+# map auth for QR format
+$type = "WPA"
+if ($auth -eq "open") { $type = "nopass" }
 
-$wifiString = "WIFI:T:$authType;S:$ssid;P:$password;;"
+$wifiString = "WIFI:T:$type;S:$ssid;P:$pass;;"
 
 # ---------------------------------------------------------
-# Generate QR code using built-in .NET
+# Build the UI
 # ---------------------------------------------------------
-
-Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 
-# Create QR code bitmap using .NET
-$writer = New-Object System.Drawing.Bitmap 400,400
-$graphics = [System.Drawing.Graphics]::FromImage($writer)
-$graphics.Clear([System.Drawing.Color]::White)
-
-# Use a QR encoder from .NET - simple implementation via Windows.Forms barcode generation
-# For brevity in this demo, using WebBrowser to render via Google Chart API
-$qrUrl = "https://chart.googleapis.com/chart?chs=400x400&cht=qr&chl=$([uri]::EscapeDataString($wifiString))"
+$qrUrl = "https://chart.googleapis.com/chart?chs=350x350&cht=qr&chl=$([uri]::EscapeDataString($wifiString))"
 
 $form = New-Object Windows.Forms.Form
-$form.Text = "Wi-Fi QR Code for $ssid"
-$form.Width = 420
-$form.Height = 440
+$form.Text = "QR Code: $ssid"
+$form.Size = "400,450"
+$form.StartPosition = "CenterScreen"
+$form.FormBorderStyle = "FixedDialog"
+$form.Topmost = $true
 
 $pb = New-Object Windows.Forms.PictureBox
-$pb.Width = 400
-$pb.Height = 400
-$pb.SizeMode = "StretchImage"
-$pb.Top = 10
-$pb.Left = 10
+$pb.Dock = "Fill"
+$pb.SizeMode = "CenterImage"
 
-# Load QR image from URL
-$wc = New-Object System.Net.WebClient
-$ms = New-Object System.IO.MemoryStream ($wc.DownloadData($qrUrl))
-$pb.Image = [System.Drawing.Image]::FromStream($ms)
+try {
+    $wc = New-Object System.Net.WebClient
+    $imgData = $wc.DownloadData($qrUrl)
+    $ms = New-Object System.IO.MemoryStream(,$imgData)
+    $pb.Image = [System.Drawing.Image]::FromStream($ms)
+}
+catch {
+    Write-Error "failed to download QR code: $($_.Exception.Message)"
+    exit
+}
 
 $form.Controls.Add($pb)
-$form.Topmost = $true
-$form.ShowDialog()
+$form.ShowDialog() | Out-Null
