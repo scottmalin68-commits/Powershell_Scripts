@@ -10,6 +10,9 @@ into a ZIP archive.
 A manifest file is generated during export containing metadata such as
 computer name, OS version, export date, and number of profiles.
 
+.Author
+Scott M.
+
 .PARAMETER Mode
 Specifies the operation mode.
 
