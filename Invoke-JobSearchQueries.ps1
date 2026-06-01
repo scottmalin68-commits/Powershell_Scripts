@@ -4,34 +4,46 @@
 .DESCRIPTION
     This script automates cyber-intelligence gathering for job targeting. 
     It opens a GUI File Explorer window filtered to 'Posting-*.md' files,
-    extracts pure 'site:linkedin.com' search strings under '#### 13. THE HUNT', 
-    runs them against Gemini with live search grounding, logs the queries, 
-    and appends the findings to the file.
+    extracts pure 'site:linkedin.com' search strings and their descriptive labels 
+    under '#### 13. THE HUNT', runs them against Gemini with live search grounding, 
+    logs the queries, and appends the findings to the file.
 .CHANGELOG
     v1.4.4 - Added automatic 3-tier retry logic with exponential backoff for 503 high-demand server errors.
     v1.4.5 - Integrated dynamic exception handling to extract and display raw JSON error strings from Google backends.
     v1.4.6 - Hardened API payload structural integrity with high-depth JSON serialization for deep nested object tracking.
     v1.4.7 - Standardized OSINT report outputs with structured markdown tables for automated executive summaries.
+    v1.4.8 - Added sequential tracking for target lead descriptive labels to contextualize report outputs.
+    v1.4.9 - Abstracted retry, retry delay, and pacing limits into central configuration block for easier free-tier tuning.
+    v1.5.0 - Updated default engine fallback with verified high-quota workspace API key.
+    v1.5.1 - Sanitized credential keys for public GitHub repository safety and overhauled onboarding documentation.
 .NOTES
     ============================================================================
-    HOW TO GENERATE AND SECURE YOUR GEMINI API KEY
+    ACCOUNT SETUP & HIGH-QUOTA API KEY DEPLOYMENT
     ============================================================================
-    1. Get a Key:
-       · Go to Google AI Studio (aistudio.google.com).
-       · Sign in with your Google account.
-       · Click "Get API key" and create a new key in a new or existing project.
+    1. INITIAL GOOGLE ACCOUNT REGISTRATION
+       · Navigate to Google AI Studio (aistudio.google.com).
+       · Sign in with your primary Google identity. 
+       · Accept the platform Terms of Service to initialize the developer profile.
     
-    2. Secure the Key locally (Recommended):
-       · To avoid hardcoding your key, save it as an environment variable.
-       · Open PowerShell as Administrator and run:
-         [System.Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "your_actual_key_here", "User")
-       · Restart your PowerShell terminal so the changes take effect.
-       · The script will automatically detect and pull this environment variable.
+    2. DEPLOYING A HIGH-QUOTA WORKSPACE PROJECT (CRITICAL)
+       · Do NOT simply generate a key immediately on the landing dashboard; this 
+         frequently binds the key to a heavily throttled 'Default Gemini Project' 
+         restricted to a tiny 20 Requests Per Day (RPD) trial cap.
+       · Select "Get API key" from the left-hand navigation pane.
+       · Click the "Create API key" button to open the configuration modal.
+       · Locate the dropdown menu under "Choose an imported project".
+       · Select "Create a new project" (or "Create new cloud project").
+       · Click "Create key". This provisions a dedicated workspace that grants 
+         the full standard Free Tier allocation (up to 250+ RPD for core models 
+         and up to 1,500 RPD for search grounding tools).
     
-    3. Hardcoded Fallback (GitHub Warning):
-       · If you paste your key directly into the $GeminiApiKey variable, 
-         MAKE SURE to clear it out before pushing this script to GitHub.
-       · GitHub will automatically scan and flag exposed Google API keys.
+    3. LOCAL SYSTEM ENVIRONMENT VARIABLE PERSISTENCE (RECOMMENDED)
+       · To bypass hardcoding cleartext strings inside production scripts, bind 
+         the key to an encrypted user-scope environment variable.
+       · Open an elevated PowerShell terminal and execute the following line:
+         [System.Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "YOUR_ACTUAL_API_KEY_HERE", "User")
+       · Restart your terminal application to reload the environment block.
+       · The engine will automatically intercept this variable at runtime.
     ============================================================================
 #>
 
@@ -44,10 +56,12 @@ if (-not $GeminiApiKey) {
 }
 
 # Centralized Query Log File
-$QueryLogFile = ".\google_query_log.txt"
+$QueryLogFile = "C:\Users\Scott\OneDrive\Documents\Resumes\google_query_log.txt"
 
-# Delay pacing between API requests to respect RPM limits (in seconds)
-$PacingDelaySeconds = 15
+# Rate Limit & Throttling Adjustments (Optimized for Free Tier Quotas)
+$PacingDelaySeconds = 30   # Time to wait between completely different queries
+$MaxRetryAttempts   = 3    # Total times to try a failing request before giving up
+$InitialRetryDelay  = 30   # Seconds to wait on first failure (doubles each time)
 
 # ==============================================================================
 # ENGINE CORE FUNCTIONS
@@ -91,13 +105,28 @@ function Get-SearchStrings {
     $SectionText = $Match.Groups[1].Value
     $Lines = $SectionText -split "`r?`n"
     $Queries = @()
+    $CurrentLabel = "Unknown Vector"
 
     foreach ($Line in $Lines) {
-        $Cleaned = $Line.Trim() -replace "^[\*\s•\-\d\.]+", ""
-        $Cleaned = $Cleaned.Trim("'`"")
+        $Cleaned = $Line.Trim()
 
-        if ($Cleaned -match "^\s*site:linkedin\.com\/\S+") {
-            $Queries += $Cleaned
+        # check if this line is a label heading (e.g., "1. Direct Lead...:")
+        if ($Cleaned -match "^\d+\.\s*(.+):$") {
+            $CurrentLabel = $Matches[1].Trim()
+            continue
+        }
+
+        # clean up query line
+        $CleanedQuery = $Cleaned -replace "^[\*\s•\-\d\.]+", ""
+        $CleanedQuery = $CleanedQuery.Trim("'`"")
+
+        if ($CleanedQuery -match "^\s*site:linkedin\.com\/\S+") {
+            $Queries += [PSCustomObject]@{
+                Label = $CurrentLabel
+                Query = $CleanedQuery
+            }
+            # reset back to default for safety
+            $CurrentLabel = "Unknown Vector"
         }
     }
 
@@ -129,13 +158,12 @@ function Invoke-GroundedSearch {
         )
     } | ConvertTo-Json -Depth 10
 
-    $MaxAttempts = 3
     $Attempt = 1
-    $RetryDelay = 5
+    $CurrentRetryDelay = $InitialRetryDelay
 
-    while ($Attempt -le $MaxAttempts) {
+    while ($Attempt -le $MaxRetryAttempts) {
         try {
-            Write-Host "Executing live search grounding (Attempt $Attempt/$MaxAttempts) for: '$Query'" -ForegroundColor Yellow
+            Write-Host "Executing live search grounding (Attempt $Attempt/$MaxRetryAttempts) for: '$Query'" -ForegroundColor Yellow
             $Response = Invoke-RestMethod -Uri $Uri -Method Post -Body $Body -ContentType "application/json" -TimeoutSec 45
             $ResultText = $Response.candidates[0].content.parts[0].text
             return $ResultText
@@ -155,10 +183,10 @@ function Invoke-GroundedSearch {
 
             Write-Warning "Attempt $Attempt failed. Server response: $ErrorMessage"
 
-            if ($Attempt -lt $MaxAttempts) {
-                Write-Host "Server overloaded or rate-limited. Backing off and retrying in $RetryDelay seconds..." -ForegroundColor Gray
-                Start-Sleep -Seconds $RetryDelay
-                $RetryDelay = $RetryDelay * 2 # Exponential backoff
+            if ($Attempt -lt $MaxRetryAttempts) {
+                Write-Host "Server overloaded or rate-limited. Backing off and retrying in $CurrentRetryDelay seconds..." -ForegroundColor Gray
+                Start-Sleep -Seconds $CurrentRetryDelay
+                $CurrentRetryDelay = $CurrentRetryDelay * 2 # Exponential backoff
             }
             $Attempt++
         }
@@ -188,7 +216,7 @@ function Add-QueryLog {
 function Append-ResultsToMarkdown {
     param (
         [string]$FilePath,
-        [hashtable]$SearchResults
+        [array]$SearchResults
     )
 
     $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -205,9 +233,10 @@ function Append-ResultsToMarkdown {
     $OutputBlock += "| **Engine Status** | Completed |`n`n"
     $OutputBlock += "---`n"
 
-    foreach ($Key in $SearchResults.Keys) {
-        $OutputBlock += "`n### 🔍 Target Query: $Key`n"
-        $OutputBlock += "$($SearchResults[$Key])`n"
+    foreach ($Result in $SearchResults) {
+        $OutputBlock += "`n### 🔍 Target: $($Result.Label)`n"
+        $OutputBlock += "**Query:** \`$($Result.Query)\`\n\n"
+        $OutputBlock += "$($Result.Output)`n"
         $OutputBlock += "`n"
     }
 
@@ -225,11 +254,11 @@ function Append-ResultsToMarkdown {
 # ==============================================================================
 function Main {
     Write-Host "================================================================================" -ForegroundColor Cyan
-    Write-Host "LAUNCHING AUTO-HUNT POWERSHELL ENGINE (v1.4.7)" -ForegroundColor Cyan
+    Write-Host "LAUNCHING AUTO-HUNT POWERSHELL ENGINE (v1.5.1)" -ForegroundColor Cyan
     Write-Host "================================================================================" -ForegroundColor Cyan
 
     if ($GeminiApiKey -eq "YOUR_GEMINI_API_KEY_HERE" -or -not $GeminiApiKey) {
-        Write-Error "API Key is not configured properly. Please update the `$GeminiApiKey variable."
+        Write-Error "API Key is not configured properly. Please update the `$GeminiApiKey variable or your system environment variables."
         return
     }
 
@@ -247,16 +276,21 @@ function Main {
     }
 
     Write-Host "Found $($Queries.Count) valid target queries to process." -ForegroundColor Green
-    $Results = @{}
+    $Results = @()
 
     for ($i = 0; $i -lt $Queries.Count; $i++) {
-        $CurrentQuery = $Queries[$i]
-        Write-Host "`n[$($i + 1)/$($Queries.Count)] Processing target..." -ForegroundColor Cyan
+        $CurrentTarget = $Queries[$i]
+        Write-Host "`n[$($i + 1)/$($Queries.Count)] Processing: $($CurrentTarget.Label)..." -ForegroundColor Cyan
         
-        Add-QueryLog -LogPath $QueryLogFile -Query $CurrentQuery
+        Add-QueryLog -LogPath $QueryLogFile -Query $CurrentTarget.Query
         
-        $ResultContent = Invoke-GroundedSearch -Query $CurrentQuery -ApiKey $GeminiApiKey
-        $Results[$CurrentQuery] = $ResultContent
+        $ResultContent = Invoke-GroundedSearch -Query $CurrentTarget.Query -ApiKey $GeminiApiKey
+        
+        $Results += [PSCustomObject]@{
+            Label  = $CurrentTarget.Label
+            Query  = $CurrentTarget.Query
+            Output = $ResultContent
+        }
 
         if ($i -lt ($Queries.Count -1)) {
             Write-Host "Throttling execution for $PacingDelaySeconds seconds to manage API quota safety..." -ForegroundColor Gray
