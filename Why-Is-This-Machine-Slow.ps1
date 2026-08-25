@@ -1,16 +1,21 @@
 <#
 ================================================================================
  Script Name : Why-Is-This-Machine-Slow.ps1
- Author      : Scott M (with improvements)
- Version     : 1.2.0
+ Author      : Scott Malin, CISSP
+ Version     : 1.3.0
 ================================================================================
  GOAL
- ----
  Quickly identify likely causes of performance degradation on Windows machines.
  Supports local and remote execution with clear limitation warnings.
 ================================================================================
- CHANGELOG (from 1.1.0)
+ CHANGELOG
  ---------
+ 1.3.0
+  - Added self-elevation requirement check for Admin rights
+  - Replaced slow/flaky Get-Counter calls with Win32_PerfFormattedData CIM queries
+  - Fixed CPU core calculation bug in remote targets
+  - Standardized property names (CpuPercent, IoBytesPerSec) across object outputs
+  - Handled native quser failures cleanly on Windows Home editions
  1.2.0
   - Fixed CPU metric: now uses % Processor Time instead of lifetime seconds
   - Fixed disk I/O: now uses IO Data Bytes/sec (rate) with sampling
@@ -25,14 +30,19 @@
 [CmdletBinding()]
 param (
     [Parameter()]
-    [string]$ComputerName = $env:COMPUTERNAME,
-
-    [Parameter()]
-    [int]$SampleIntervalSec = 5,   # Time between perf samples (local only)
-
-    [Parameter()]
-    [int]$SampleCount = 2          # Number of samples to average (local only)
+    [string]$ComputerName = $env:COMPUTERNAME
 )
+
+# -----------------------------------------------------------------------------
+# Admin Elevation Check
+# -----------------------------------------------------------------------------
+$IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $IsAdmin) {
+    Write-Host "`n[!] WARNING: Script is not running as Administrator." -ForegroundColor Yellow
+    Write-Host "    Defender status, Security events, and some performance metrics will fail." -ForegroundColor Yellow
+    $confirm = Read-Host "    Do you want to continue anyway? (Y/N)"
+    if ($confirm -ne 'Y') { return }
+}
 
 $IsRemote = $ComputerName -ne $env:COMPUTERNAME
 $ConfidenceScore = 100
@@ -52,88 +62,69 @@ if ($IsRemote) {
 # Data Collection Block (runs locally or via Invoke-Command)
 # =============================================================================
 $Session = {
-    param($IsRemote, $SampleIntervalSec, $SampleCount)
-
     $ErrorActionPreference = 'SilentlyContinue'
+    $LogicalCores = [Environment]::ProcessorCount
 
     # -------------------------------------------------------------------------
-    # CPU - % Processor Time (much better than lifetime seconds)
+    # CPU - Real-time process snapshot via CIM
     # -------------------------------------------------------------------------
-    $cpuCounter = '\Process(*)\% Processor Time'
     $topCpu = @()
     try {
-        if (-not $IsRemote -and $SampleCount -gt 1) {
-            $samples = Get-Counter $cpuCounter -SampleInterval $SampleIntervalSec -MaxSamples $SampleCount
-            $avg = $samples.CounterSamples | Group-Object InstanceName | ForEach-Object {
-                $sum = ($_.Group | Measure-Object CookedValue -Sum).Sum
-                [pscustomobject]@{
-                    InstanceName = $_.Name
-                    AvgPercent   = [math]::Round($sum / $_.Count / $env:NUMBER_OF_PROCESSORS, 1)
-                }
+        $topCpu = Get-CimInstance Win32_PerfFormattedData_PerfOS_Process | 
+            Where-Object Name -notin '_Total','Idle' | 
+            Sort-Object PercentProcessorTime -Descending | 
+            Select-Object -First 5 @{
+                Name='Process';    Expression={$_.Name}
+            }, @{
+                Name='CpuPercent'; Expression={[math]::Round($_.PercentProcessorTime / $LogicalCores, 1)}
             }
-            $topCpu = $avg | Where-Object InstanceName -notin '_total','idle' |
-                      Sort-Object AvgPercent -Descending | Select-Object -First 5
-        } else {
-            # Single snapshot (remote or quick local)
-            $snapshot = Get-Counter $cpuCounter
-            $topCpu = $snapshot.CounterSamples | Where-Object InstanceName -notin '_total','idle' |
-                      Sort-Object CookedValue -Descending | Select-Object -First 5 @{
-                          Name='Process'; Expression={$_.InstanceName}
-                          Name='CPU%';    Expression={[math]::Round($_.CookedValue / $env:NUMBER_OF_PROCESSORS, 1)}
-                      }
-        }
     } catch {
         $topCpu = "Error collecting CPU data"
     }
 
     # -------------------------------------------------------------------------
-    # Disk I/O rate (bytes/sec)
+    # Disk I/O rate (bytes/sec) via CIM
     # -------------------------------------------------------------------------
-    $ioCounters = '\Process(*)\IO Data Bytes/sec'
     $topDiskIo = @()
     try {
-        if (-not $IsRemote -and $SampleCount -gt 1) {
-            $samples = Get-Counter $ioCounters -SampleInterval $SampleIntervalSec -MaxSamples $SampleCount
-            $avgIo = $samples.CounterSamples | Group-Object InstanceName | ForEach-Object {
-                $sum = ($_.Group | Measure-Object CookedValue -Sum).Sum
-                [pscustomobject]@{
-                    InstanceName = $_.Name
-                    AvgBytesSec  = [math]::Round($sum / $_.Count, 0)
-                }
+        $topDiskIo = Get-CimInstance Win32_PerfFormattedData_PerfOS_Process | 
+            Where-Object Name -notin '_Total','Idle' | 
+            Sort-Object IODataBytesPersec -Descending | 
+            Select-Object -First 5 @{
+                Name='Process';       Expression={$_.Name}
+            }, @{
+                Name='IoBytesPerSec'; Expression={[uint64]$_.IODataBytesPersec}
             }
-            $topDiskIo = $avgIo | Where-Object InstanceName -notin '_total','idle' |
-                         Sort-Object AvgBytesSec -Descending | Select-Object -First 5
-        } else {
-            $snapshot = Get-Counter $ioCounters
-            $topDiskIo = $snapshot.CounterSamples | Where-Object InstanceName -notin '_total','idle' |
-                         Sort-Object CookedValue -Descending | Select-Object -First 5 @{
-                             Name='Process';     Expression={$_.InstanceName}
-                             Name='IO Bytes/sec';Expression={[math]::Round($_.CookedValue, 0)}
-                         }
-        }
     } catch {
         $topDiskIo = "Error collecting disk I/O data"
     }
 
     # -------------------------------------------------------------------------
-    # Physical Disk Queue Length (important for storage bottleneck)
+    # Physical Disk Queue Length
     # -------------------------------------------------------------------------
     $diskQueue = "Unknown"
     try {
-        $q = Get-Counter '\PhysicalDisk(_Total)\Avg. Disk Queue Length' -ErrorAction Stop
-        $diskQueue = [math]::Round($q.CounterSamples.CookedValue, 2)
+        $diskPerf = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk | Where-Object Name -eq '_Total'
+        if ($diskPerf) {
+            $diskQueue = [math]::Round($diskPerf.AvgDiskQueueLength, 2)
+        }
     } catch {}
 
     # -------------------------------------------------------------------------
     # Memory & Paging
     # -------------------------------------------------------------------------
-    $mem = Get-CimInstance Win32_OperatingSystem
-    $memUsedPct = [math]::Round( (100 - ($mem.FreePhysicalMemory / $mem.TotalVisibleMemorySize * 100)), 1)
+    $memUsedPct = "Unknown"
+    try {
+        $mem = Get-CimInstance Win32_OperatingSystem
+        $memUsedPct = [math]::Round((100 - ($mem.FreePhysicalMemory / $mem.TotalVisibleMemorySize * 100)), 1)
+    } catch {}
 
     $pagesSec = "Unknown"
     try {
-        $p = Get-Counter '\Memory\Pages/sec'
-        $pagesSec = [math]::Round($p.CounterSamples.CookedValue, 1)
+        $pagePerf = Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory
+        if ($pagePerf) {
+            $pagesSec = [math]::Round($pagePerf.PagesPersec, 1)
+        }
     } catch {}
 
     # -------------------------------------------------------------------------
@@ -141,15 +132,15 @@ $Session = {
     # -------------------------------------------------------------------------
     $defenderStatus = "Unknown"
     try {
-        $mp = Get-MpComputerStatus
+        $mp = Get-MpComputerStatus -ErrorAction Stop
         $defenderStatus = [ordered]@{
-            Enabled           = $mp.AntivirusEnabled
-            RealTime          = $mp.RealTimeProtectionEnabled
-            FullScanRunning   = $mp.FullScanRunning
-            QuickScanRunning  = $mp.QuickScanRunning
-            BehaviorEnabled   = $mp.BehaviorMonitorEnabled
-            IOAVEnabled       = $mp.IoavProtectionEnabled
-            LastUpdate        = $mp.AntivirusSignatureLastUpdated
+            Enabled          = $mp.AntivirusEnabled
+            RealTime         = $mp.RealTimeProtectionEnabled
+            FullScanRunning  = $mp.FullScanRunning
+            QuickScanRunning = $mp.QuickScanRunning
+            BehaviorEnabled  = $mp.BehaviorMonitorEnabled
+            IOAVEnabled      = $mp.IoavProtectionEnabled
+            LastUpdate       = $mp.AntivirusSignatureLastUpdated
         }
     } catch {
         $defenderStatus = "Access denied or module not available"
@@ -164,9 +155,14 @@ $Session = {
     } catch {}
 
     # -------------------------------------------------------------------------
-    # Logged-on users (best effort)
+    # Logged-on users (handles native CLI errors quietly)
     # -------------------------------------------------------------------------
-    $users = try { quser 2>$null } catch { "quser failed" }
+    $users = try { 
+        $qResult = quser 2>&1
+        if ($LASTEXITCODE -eq 0) { $qResult } else { "No active sessions found" }
+    } catch { 
+        "quser unavailable" 
+    }
 
     # -------------------------------------------------------------------------
     # Recent human / admin activity (last 30 min)
@@ -203,9 +199,9 @@ $Session = {
 # =============================================================================
 try {
     if ($IsRemote) {
-        $Data = Invoke-Command -ComputerName $ComputerName -ScriptBlock $Session -ArgumentList $IsRemote, $SampleIntervalSec, $SampleCount -ErrorAction Stop
+        $Data = Invoke-Command -ComputerName $ComputerName -ScriptBlock $Session -ErrorAction Stop
     } else {
-        $Data = & $Session -IsRemote $IsRemote -SampleIntervalSec $SampleIntervalSec -SampleCount $SampleCount
+        $Data = & $Session
     }
 } catch {
     Write-Host "ERROR: Failed to collect data from $ComputerName" -ForegroundColor Red
@@ -218,15 +214,16 @@ try {
 # =============================================================================
 if ($Data.TopCpu -is [array] -and $Data.TopCpu.Count -gt 0) {
     $topProc = $Data.TopCpu[0]
-    if ($topProc.CPU% -gt 70 -or $topProc.AvgPercent -gt 70) {
-        $Findings.Add("High CPU usage detected (Top: $($topProc.Process ?? $topProc.Name) @ ~$($topProc.CPU% ?? $topProc.AvgPercent)% )")
+    if ($topProc.CpuPercent -gt 70) {
+        $Findings.Add("High CPU usage detected (Top: $($topProc.Process) @ ~$($topProc.CpuPercent)%)")
     }
 }
 
 if ($Data.TopDiskIo -is [array] -and $Data.TopDiskIo.Count -gt 0) {
     $topIo = $Data.TopDiskIo[0]
-    if (($topIo.'IO Bytes/sec' -gt 20MB) -or ($topIo.AvgBytesSec -gt 20MB)) {
-        $Findings.Add("Heavy disk I/O (Top: $($topIo.Process ?? $topIo.Name) @ ~$([math]::Round(($topIo.'IO Bytes/sec' ?? $topIo.AvgBytesSec')/1MB,1)) MB/s)")
+    if ($topIo.IoBytesPerSec -gt 20MB) {
+        $mbRate = [math]::Round($topIo.IoBytesPerSec / 1MB, 1)
+        $Findings.Add("Heavy disk I/O (Top: $($topIo.Process) @ ~$mbRate MB/s)")
     }
 }
 
@@ -234,7 +231,7 @@ if ($Data.DiskQueue -is [double] -and $Data.DiskQueue -gt 2.0) {
     $Findings.Add("Disk queue length high ($($Data.DiskQueue)) → storage bottleneck likely")
 }
 
-if ($Data.MemoryUsedPct -gt 88) {
+if ($Data.MemoryUsedPct -is [double] -and $Data.MemoryUsedPct -gt 88) {
     $Findings.Add("High memory usage ($($Data.MemoryUsedPct)% used)")
 }
 
@@ -271,15 +268,17 @@ if ($Data.TopCpu -is [array]) { $Data.TopCpu | Format-Table -AutoSize }
 else { Write-Host $Data.TopCpu -ForegroundColor DarkGray }
 
 Write-Host "`n--- Top Disk I/O Consumers ---" -ForegroundColor Cyan
-if ($Data.TopDiskIo -is [array]) { $Data.TopDiskIo | Format-Table -AutoSize }
+if ($Data.TopDiskIo -is [array]) { 
+    $Data.TopDiskIo | Select-Object Process, @{N='IO Rate (MB/s)';E={[math]::Round($_.IoBytesPerSec / 1MB, 2)}} | Format-Table -AutoSize 
+}
 else { Write-Host $Data.TopDiskIo -ForegroundColor DarkGray }
 
 Write-Host "`n--- Key Indicators ---" -ForegroundColor Cyan
 "Disk Queue Length     : $($Data.DiskQueue)"
-"Memory Used           : $($Data.MemoryUsedPct)%"
-"Pages/sec             : $($Data.PagesPerSec)"
-"Recent Security Events: $($Data.RecentActivity)"
-"Windows Update Active : $($Data.WindowsUpdate)"
+"Memory Used            : $($Data.MemoryUsedPct)%"
+"Pages/sec              : $($Data.PagesPerSec)"
+"Recent Security Events : $($Data.RecentActivity)"
+"Windows Update Active  : $($Data.WindowsUpdate)"
 "" | Write-Host
 
 if ($Data.Defender -is [object]) {

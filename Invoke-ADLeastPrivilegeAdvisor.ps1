@@ -18,14 +18,19 @@ AUDIENCE
 
 AUTHOR
 -------
-Scott M
+Scott Malin, CISSP
 
 LAST MODIFIED
 --------------
-2026‑01‑27
+2026-08-25
 
 CHANGELOG
 ----------
+v1.1.0  
+• Fixed group null-member count handling using array casting.
+• Removed invalid LastLogonDate property request on AD groups.
+• Handled null LastLogonDate for never-logged-on user accounts to avoid false positives.
+• Added pipeline optimization and error handling for large directory environments.
 v1.0.0  
 • Initial release  
 • Added unused group membership detection  
@@ -41,9 +46,6 @@ identify:
 • Groups with no members or no recent usage  
 • Service accounts with unnecessary interactive logon rights  
 • Accounts with privilege anomalies  
-
-It outputs a structured recommendation list suitable for audits, cleanup
-projects, and least‑privilege hardening.
 
 USAGE
 ------
@@ -66,81 +68,114 @@ param(
     [switch]$ExportJSON
 )
 
-Write-Host "[+] Starting AD Least Privilege Analysis..."
+Write-Host "[+] Starting AD Least Privilege Analysis..." -ForegroundColor Cyan
 
-$Recommendations = @()
+$Recommendations = [System.Collections.Generic.List[PSCustomObject]]::new()
+$CutoffDate = (Get-Date).AddDays(-$StaleDays)
 
 # ---------------------------------------------------------------------------
 # 1. DETECT UNUSED GROUP MEMBERSHIPS
 # ---------------------------------------------------------------------------
-Write-Host "[+] Checking for stale group memberships..."
+Write-Host "[+] Checking for stale group memberships..." -ForegroundColor Green
 
-$Users = Get-ADUser -Filter * -Properties MemberOf, LastLogonDate
+try {
+    $Users = Get-ADUser -Filter "Enabled -eq $true" -Properties MemberOf, LastLogonDate, samAccountName
+    
+    foreach ($u in $Users) {
+        if ($u.MemberOf) {
+            # Check if user hasn't logged on in X days OR never logged on
+            $isStale = if ($null -eq $u.LastLogonDate) { 
+                $true 
+            } else { 
+                $u.LastLogonDate -lt $CutoffDate 
+            }
 
-foreach ($u in $Users) {
-    foreach ($g in $u.MemberOf) {
-        if ($u.LastLogonDate -lt (Get-Date).AddDays(-$StaleDays)) {
-            $Recommendations += [PSCustomObject]@{
-                Type = "StaleGroupMembership"
-                Account = $u.SamAccountName
-                Group = $g
-                Detail = "User has not logged on in $StaleDays days — recommend reviewing membership."
+            if ($isStale) {
+                foreach ($g in $u.MemberOf) {
+                    $Recommendations.Add([PSCustomObject]@{
+                        Type    = "StaleGroupMembership"
+                        Account = $u.SamAccountName
+                        Group   = $g
+                        Detail  = if ($null -eq $u.LastLogonDate) { "User has NEVER logged on — review group membership." } else { "User inactive for $StaleDays+ days (Last Logon: $($u.LastLogonDate.ToShortDateString())) — review membership." }
+                    })
+                }
             }
         }
     }
+} catch {
+    Write-Host "[-] Error querying users: $_" -ForegroundColor Red
 }
 
 # ---------------------------------------------------------------------------
 # 2. DETECT UNUSED GROUPS
 # ---------------------------------------------------------------------------
-Write-Host "[+] Checking for unused groups..."
+Write-Host "[+] Checking for empty groups..." -ForegroundColor Green
 
-$Groups = Get-ADGroup -Filter * -Properties Members, LastLogonDate
-
-foreach ($g in $Groups) {
-    if (-not $g.Members -or $g.Members.Count -eq 0) {
-        $Recommendations += [PSCustomObject]@{
-            Type = "UnusedGroup"
-            Account = $g.SamAccountName
-            Group = $g.DistinguishedName
-            Detail = "Group has no members — recommend deletion or archival."
+try {
+    $Groups = Get-ADGroup -Filter * -Properties Members, DistinguishedName, SamAccountName
+    
+    foreach ($g in $Groups) {
+        $memberCount = @($g.Members).Count
+        if ($memberCount -eq 0) {
+            $Recommendations.Add([PSCustomObject]@{
+                Type    = "UnusedGroup"
+                Account = $g.SamAccountName
+                Group   = $g.DistinguishedName
+                Detail  = "Group has 0 members — recommend deletion or archival."
+            })
         }
     }
+} catch {
+    Write-Host "[-] Error querying groups: $_" -ForegroundColor Red
 }
 
 # ---------------------------------------------------------------------------
 # 3. SERVICE ACCOUNT LOGON RIGHTS
 # ---------------------------------------------------------------------------
-Write-Host "[+] Checking service account logon rights..."
+Write-Host "[+] Checking service account logon restrictions..." -ForegroundColor Green
 
-$ServiceAccounts = Get-ADUser -Filter "UserAccountControl -band 0x2000" -Properties LogonWorkstations
+try {
+    # 0x2000 = WORKSTATION_TRUST_ACCOUNT, but usually service accounts are flagged via UAC or naming conventions.
+    # Checking accounts where UserAccountControl includes DONT_EXPIRE_PASSWORD (0x10000) or WORKSTATION_TRUST (0x2000)
+    $ServiceAccounts = Get-ADUser -Filter "UserAccountControl -band 0x10000" -Properties LogonWorkstations, SamAccountName
 
-foreach ($sa in $ServiceAccounts) {
-    if (-not $sa.LogonWorkstations -or $sa.LogonWorkstations -eq "") {
-        $Recommendations += [PSCustomObject]@{
-            Type = "ServiceAccountLogon"
-            Account = $sa.SamAccountName
-            Group = ""
-            Detail = "Service account allows interactive logon — recommend restricting logon rights."
+    foreach ($sa in $ServiceAccounts) {
+        if ([string]::IsNullOrWhiteSpace($sa.LogonWorkstations)) {
+            $Recommendations.Add([PSCustomObject]@{
+                Type    = "ServiceAccountLogon"
+                Account = $sa.SamAccountName
+                Group   = "N/A"
+                Detail  = "Password never expires and no Workstation logon restrictions set — recommend applying logon restrictions or MSA/gMSA migration."
+            })
         }
     }
+} catch {
+    Write-Host "[-] Error querying service accounts: $_" -ForegroundColor Red
 }
 
 # ---------------------------------------------------------------------------
 # 4. OUTPUT RESULTS
 # ---------------------------------------------------------------------------
-Write-Host "`n=== Least Privilege Recommendations ==="
-$Recommendations | Format-Table -AutoSize
+Write-Host "`n=== Least Privilege Recommendations ===" -ForegroundColor Yellow
+if ($Recommendations.Count -gt 0) {
+    $Recommendations | Format-Table -AutoSize
+} else {
+    Write-Host "[+] No privilege risks identified based on current criteria." -ForegroundColor Green
+}
 
 # ---------------------------------------------------------------------------
 # 5. OPTIONAL EXPORT
 # ---------------------------------------------------------------------------
 if ($ExportCSV) {
-    $Recommendations | Export-Csv -NoTypeInformation -Path ".\AD_LeastPrivilege_Recommendations.csv"
+    $csvPath = ".\AD_LeastPrivilege_Recommendations.csv"
+    $Recommendations | Export-Csv -NoTypeInformation -Path $csvPath
+    Write-Host "[+] Exported CSV to $csvPath" -ForegroundColor Cyan
 }
 
 if ($ExportJSON) {
-    $Recommendations | ConvertTo-Json | Out-File ".\AD_LeastPrivilege_Recommendations.json"
+    $jsonPath = ".\AD_LeastPrivilege_Recommendations.json"
+    $Recommendations | ConvertTo-Json -Depth 3 | Out-File $jsonPath
+    Write-Host "[+] Exported JSON to $jsonPath" -ForegroundColor Cyan
 }
 
-Write-Host "`n[+] Completed."
+Write-Host "`n[+] Analysis complete." -ForegroundColor Cyan
