@@ -10,15 +10,20 @@
     Outputs results to a CSV for further investigation, including severity and score.
 
 .NOTES
-    Author: Scott M
-    Version: 1.1
+    Author: Scott Malin, CISSP
+    Version: 1.2.0
 
 .CHANGELOG
-    1.1 - Added:
-          - Privilege escalation detection
-          - Security posture checks
-          - Severity scoring (Low/Medium/High/Critical + numeric score)
-    1.0 - Initial release with basic anomaly detection and CSV export
+    1.2.0 - Performance & Scale Optimization:
+            - Replaced `Get-ADUser -Properties *` with explicitly targeted properties to prevent memory exhaustion.
+            - Eliminated repeated `Get-ADPrincipalGroupMembership` calls inside loops by resolving memberDNs locally.
+            - Fixed `Get-ADGroupMember` ADWS 5,000-member limits by reading raw `Members` property collections.
+            - Deduplicated redundant finding evaluations across Hygiene and SecurityPosture logic block boundaries.
+    1.1.0 - Added:
+            - Privilege escalation detection
+            - Security posture checks
+            - Severity scoring (Low/Medium/High/Critical + numeric score)
+    1.0.0 - Initial release with basic anomaly detection and CSV export
 #>
 
 Import-Module ActiveDirectory
@@ -71,7 +76,7 @@ function Add-Finding {
         0
     }
 
-    $script:Results += [pscustomobject]@{
+    $script:Results.Add([pscustomobject]@{
         ObjectType        = $ObjectType
         Name              = $Name
         DistinguishedName = $DistinguishedName
@@ -80,30 +85,35 @@ function Add-Finding {
         Severity          = $Severity
         Score             = $score
         Extra             = $Extra
-    }
-}
-
-function Get-PrivilegedGroups {
-    param(
-        [System.Collections.Generic.List[Microsoft.ActiveDirectory.Management.ADGroup]]$AllGroups
-    )
-
-    return $AllGroups | Where-Object { $PrivilegedGroupNames -contains $_.Name }
+    })
 }
 
 # -----------------------------
 # Data collection
 # -----------------------------
 
-$Results = @()
+$Results = [System.Collections.Generic.List[PSCustomObject]]::new()
 
 Write-Host "Loading Active Directory objects..." -ForegroundColor Cyan
 
-$users  = Get-ADUser  -Filter * -Properties * 
-$groups = Get-ADGroup -Filter * -Properties *
+# Explicit property targeted fetching to save memory and network overhead
+$userProperties = @(
+    'SamAccountName', 'DistinguishedName', 'Enabled', 'LastLogonDate',
+    'PasswordNeverExpires', 'adminCount', 'userAccountControl', 'MemberOf'
+)
+$users = Get-ADUser -Filter * -Properties $userProperties
 
-# Pre-resolve privileged groups
-$privilegedGroups = Get-PrivilegedGroups -AllGroups ([System.Collections.Generic.List[Microsoft.ActiveDirectory.Management.ADGroup]]$groups)
+$groupProperties = @('Name', 'DistinguishedName', 'ManagedBy', 'Members')
+$groups = Get-ADGroup -Filter * -Properties $groupProperties
+
+# Pre-map group DNs and names for fast local lookup
+$GroupDNMap = @{}
+foreach ($g in $groups) {
+    $GroupDNMap[$g.DistinguishedName] = $g
+}
+
+# Pre-resolve privileged group DistinguishedNames
+$PrivilegedGroupDNs = $groups | Where-Object { $PrivilegedGroupNames -contains $_.Name } | Select-Object -ExpandProperty DistinguishedName
 
 $total   = $users.Count + $groups.Count
 $counter = 0
@@ -137,30 +147,29 @@ foreach ($user in $users) {
     }
 
     # --- Hygiene: Disabled but still in groups ---
-    if ($user.Enabled -eq $false) {
-        $groupsForUser = Get-ADPrincipalGroupMembership -Identity $user -ErrorAction SilentlyContinue
-        if ($groupsForUser.Count -gt 0) {
-            Add-Finding -ObjectType "User" -Name $name -DistinguishedName $dn `
-                -Issue "Disabled account still has group memberships" `
-                -Severity "Medium" -Category "Hygiene" `
-                -Extra ("Groups: " + ($groupsForUser.Name -join "; "))
+    if ($user.Enabled -eq $false -and $user.MemberOf.Count -gt 0) {
+        $groupNames = foreach ($gDN in $user.MemberOf) {
+            if ($GroupDNMap.ContainsKey($gDN)) { $GroupDNMap[$gDN].Name } else { $gDN }
         }
+        Add-Finding -ObjectType "User" -Name $name -DistinguishedName $dn `
+            -Issue "Disabled account still has group memberships" `
+            -Severity "Medium" -Category "Hygiene" `
+            -Extra ("Groups: " + ($groupNames -join "; "))
     }
 
     # -----------------------------
     # Privilege escalation detection
     # -----------------------------
 
-    $userGroups = Get-ADPrincipalGroupMembership -Identity $user -ErrorAction SilentlyContinue
-    if ($userGroups) {
-        # Direct/indirect membership in privileged groups
-        $privGroupsForUser = $userGroups | Where-Object { $PrivilegedGroupNames -contains $_.Name }
-        foreach ($pg in $privGroupsForUser) {
+    if ($user.MemberOf) {
+        $matchedPrivGroups = $user.MemberOf | Where-Object { $PrivilegedGroupDNs -contains $_ }
+        foreach ($pgDN in $matchedPrivGroups) {
+            $pgName = if ($GroupDNMap.ContainsKey($pgDN)) { $GroupDNMap[$pgDN].Name } else { $pgDN }
             $sev = if ($user.Enabled) { "Critical" } else { "High" }
             Add-Finding -ObjectType "User" -Name $name -DistinguishedName $dn `
                 -Issue "Member of privileged group" `
                 -Severity $sev -Category "PrivilegeEscalation" `
-                -Extra ("Privileged group: " + $pg.Name)
+                -Extra ("Privileged group: " + $pgName)
         }
     }
 
@@ -175,33 +184,32 @@ foreach ($user in $users) {
             -Severity "Critical" -Category "SecurityPosture"
     }
 
-    # Delegation risks (userAccountControl flags)
-    # TRUSTED_FOR_DELEGATION (0x80000), SENSITIVE_AND_NOT_DELEGATED (0x100000)
+    # Delegation risks (userAccountControl bitwise flags)
     $uac = $user.userAccountControl
-    $trustedForDelegation      = [bool]($uac -band 0x80000)
-    $sensitiveAndNotDelegated  = [bool]($uac -band 0x100000)
+    if ($uac) {
+        $trustedForDelegation     = [bool]($uac -band 0x80000)
+        $sensitiveAndNotDelegated = [bool]($uac -band 0x100000)
 
-    if ($trustedForDelegation -and -not $sensitiveAndNotDelegated) {
-        $sev = if ($user.adminCount -eq 1) { "Critical" } else { "High" }
-        Add-Finding -ObjectType "User" -Name $name -DistinguishedName $dn `
-            -Issue "Account trusted for delegation without 'sensitive and not delegated' protection" `
-            -Severity $sev -Category "SecurityPosture"
-    }
+        if ($trustedForDelegation -and -not $sensitiveAndNotDelegated) {
+            $sev = if ($user.adminCount -eq 1) { "Critical" } else { "High" }
+            Add-Finding -ObjectType "User" -Name $name -DistinguishedName $dn `
+                -Issue "Account trusted for delegation without 'sensitive and not delegated' protection" `
+                -Severity $sev -Category "SecurityPosture"
+        }
 
-    # Password not required (PASSWD_NOTREQD 0x20)
-    $passwordNotRequired = [bool]($uac -band 0x20)
-    if ($passwordNotRequired) {
-        Add-Finding -ObjectType "User" -Name $name -DistinguishedName $dn `
-            -Issue "Password not required flag set" `
-            -Severity "High" -Category "SecurityPosture"
-    }
+        # Password not required (PASSWD_NOTREQD 0x20)
+        if ([bool]($uac -band 0x20)) {
+            Add-Finding -ObjectType "User" -Name $name -DistinguishedName $dn `
+                -Issue "Password not required flag set" `
+                -Severity "High" -Category "SecurityPosture"
+        }
 
-    # Pre-authentication not required (DONT_REQ_PREAUTH 0x400000)
-    $noPreAuth = [bool]($uac -band 0x400000)
-    if ($noPreAuth) {
-        Add-Finding -ObjectType "User" -Name $name -DistinguishedName $dn `
-            -Issue "Kerberos pre-authentication not required" `
-            -Severity "High" -Category "SecurityPosture"
+        # Pre-authentication not required (DONT_REQ_PREAUTH 0x400000 - AS-REP Roasting risk)
+        if ([bool]($uac -band 0x400000)) {
+            Add-Finding -ObjectType "User" -Name $name -DistinguishedName $dn `
+                -Issue "Kerberos pre-authentication not required (AS-REP Roasting risk)" `
+                -Severity "High" -Category "SecurityPosture"
+        }
     }
 }
 
@@ -213,11 +221,11 @@ foreach ($group in $groups) {
     $counter++
     Write-Progress -Activity "Scanning Groups" -Status $group.Name -PercentComplete (($counter / $total) * 100)
 
-    $dn   = $group.DistinguishedName
-    $name = $group.Name
+    $dn      = $group.DistinguishedName
+    $name    = $group.Name
+    $members = $group.Members
 
     # --- Hygiene: Empty group ---
-    $members = Get-ADGroupMember -Identity $group -ErrorAction SilentlyContinue
     if (-not $members -or $members.Count -eq 0) {
         Add-Finding -ObjectType "Group" -Name $name -DistinguishedName $dn `
             -Issue "Empty group" `
@@ -235,8 +243,7 @@ foreach ($group in $groups) {
     # Privilege escalation: privileged groups posture
     # -----------------------------
 
-    $isPrivilegedGroup = $PrivilegedGroupNames -contains $name
-    if ($isPrivilegedGroup) {
+    if ($PrivilegedGroupNames -contains $name) {
         # Large privileged group
         if ($members -and $members.Count -gt 10) {
             Add-Finding -ObjectType "Group" -Name $name -DistinguishedName $dn `
@@ -246,12 +253,15 @@ foreach ($group in $groups) {
         }
 
         # Nested groups inside privileged groups
-        $nestedGroups = $members | Where-Object { $_.objectClass -eq "group" }
-        if ($nestedGroups.Count -gt 0) {
-            Add-Finding -ObjectType "Group" -Name $name -DistinguishedName $dn `
-                -Issue "Privileged group contains nested groups (potential indirect privilege escalation)" `
-                -Severity "High" -Category "PrivilegeEscalation" `
-                -Extra ("Nested groups: " + ($nestedGroups.Name -join "; "))
+        if ($members) {
+            $nestedGroupDNs = $members | Where-Object { $GroupDNMap.ContainsKey($_) }
+            if ($nestedGroupDNs) {
+                $nestedNames = foreach ($nDN in $nestedGroupDNs) { $GroupDNMap[$nDN].Name }
+                Add-Finding -ObjectType "Group" -Name $name -DistinguishedName $dn `
+                    -Issue "Privileged group contains nested groups (potential indirect privilege escalation)" `
+                    -Severity "High" -Category "PrivilegeEscalation" `
+                    -Extra ("Nested groups: " + ($nestedNames -join "; "))
+            }
         }
     }
 }
