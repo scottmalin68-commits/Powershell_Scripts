@@ -1,8 +1,8 @@
 <#
 ================================================================================
  Script Name : Stale-Access-Auto-Reaper.ps1
- Author      : Scott M
- Version     : 1.1.0
+ Author      : Scott Malin, CISSP
+ Version     : 1.2.0
 ================================================================================
 
  GOAL
@@ -23,7 +23,7 @@
    .\Stale-Access-Auto-Reaper.ps1 -ComputerName HOSTNAME
 
  Optional Parameters:
-   -StaleDays  : Inactivity threshold (default: 90 days)
+   -StaleDays : Inactivity threshold (default: 90 days)
    -WhatIf    : Detection-only mode (no remediation)
 
  Requirements:
@@ -41,6 +41,11 @@
 ================================================================================
  CHANGELOG
  ---------
+ 1.2.0
+  - Fixed $null evaluation on $User.LastLogon preventing accidental disables
+  - Replaced PS7 ternary operators with PS5.1 compatible conditional blocks
+  - Protected built-in Administrator (SID *-500) from automated remediation
+  - Added CmdletBinding support for native ShouldProcess behavior
  1.1.0
   - Added domain account handling (read-only)
   - Added high-risk system approval gate
@@ -51,6 +56,7 @@
 ================================================================================
 #>
 
+[CmdletBinding(SupportsShouldProcess)]
 param (
     [string]$ComputerName = $env:COMPUTERNAME,
     [int]$StaleDays = 90,
@@ -63,7 +69,6 @@ param (
 $IsRemote        = $ComputerName -ne $env:COMPUTERNAME
 $CutoffDate      = (Get-Date).AddDays(-$StaleDays)
 $ConfidenceScore = 100
-$Decisions       = @()
 
 if ($IsRemote) { $ConfidenceScore -= 20 }
 
@@ -105,27 +110,33 @@ $SessionBlock = {
 
         foreach ($Admin in $Admins) {
 
-            # DOMAIN ACCOUNT → FLAG ONLY
+            # DOMAIN ACCOUNT -> FLAG ONLY
             if ($Admin.Name -match "\\") {
                 $Result.DomainAdminsFound += $Admin.Name
                 continue
             }
 
-            # LOCAL ACCOUNT → EVALUATE
+            # LOCAL ACCOUNT -> EVALUATE
             $User = Get-LocalUser -Name $Admin.Name -ErrorAction SilentlyContinue
             if (-not $User) { continue }
 
-            if ($User.Enabled -and $User.LastLogon -lt $CutoffDate) {
+            # SAFEGUARD: Skip built-in local Administrator account (SID ending in -500)
+            if ($User.SID.Value -like "*-500") {
+                continue
+            }
+
+            # SAFEGUARD: Validate LastLogon is not $null before date comparison
+            if ($User.Enabled -and $null -ne $User.LastLogon -and $User.LastLogon -lt $CutoffDate) {
                 if ($WhatIf) {
                     $Result.Warnings += "WHATIF: Would disable local admin [$($User.Name)]"
                 } else {
-                    Disable-LocalUser -Name $User.Name
+                    Disable-LocalUser -Name $User.Name -ErrorAction Stop
                     $Result.DisabledLocalAdmins += $User.Name
                 }
             }
         }
     } catch {
-        $Result.Warnings += "Failed to enumerate local administrators"
+        $Result.Warnings += "Failed to enumerate or process local administrators: $_"
     }
 
     return $Result
@@ -150,25 +161,22 @@ if ($Result.Warnings.Count -gt 0)     { $ConfidenceScore -= 10 }
 if ($Result.HighRiskDetected)         { $ConfidenceScore -= 30 }
 if ($Result.DomainAdminsFound.Count)  { $ConfidenceScore -= 5 }
 
+# PS 5.1 Compatible Conditional Syntax
+$ExecModeText = if ($IsRemote) { "REMOTE" } else { "LOCAL" }
+
 # -------------------------------------------------------------------
 # Decision Logging Payload (Central SIEM Ready)
 # -------------------------------------------------------------------
 $LogEvent = @{
     Script        = "Stale-Access-Auto-Reaper"
-    Version       = "1.1.0"
+    Version       = "1.2.0"
     ComputerName  = $ComputerName
     Timestamp     = (Get-Date).ToString("o")
-    ExecutionMode = ($IsRemote ? "REMOTE" : "LOCAL")
+    ExecutionMode = $ExecModeText
     WhatIf        = [bool]$WhatIf
     Confidence    = $ConfidenceScore
     Result        = $Result
 }
-
-# Example: Send to SIEM (disabled by default)
-# Invoke-RestMethod -Uri "https://siem.company.com/ingest" `
-#    -Method POST `
-#    -Body ($LogEvent | ConvertTo-Json -Depth 5) `
-#    -ContentType "application/json"
 
 # -------------------------------------------------------------------
 # Output
@@ -176,7 +184,7 @@ $LogEvent = @{
 Write-Host "`n================ STALE ACCESS AUTO-REAPER ================" -ForegroundColor Yellow
 Write-Host "Target System : $ComputerName"
 Write-Host "Execution     : " -NoNewline
-Write-Host ($IsRemote ? "REMOTE" : "LOCAL") -ForegroundColor Cyan
+Write-Host $ExecModeText -ForegroundColor Cyan
 Write-Host "Confidence    : $ConfidenceScore%"
 
 if ($Result.HighRiskDetected) {
