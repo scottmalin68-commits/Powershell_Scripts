@@ -8,17 +8,12 @@ be restored later. Profiles are exported as XML files and compressed
 into a ZIP archive.
 
 .AUTHOR
-Scott M.
+Scott Malin, CISSP
 
 .CHANGELOG
 v1.0.0 (2026-03-12) - Initial version
 v1.1.0 (2026-03-12) - Added Error Handling, ZIP cleanup, and Switch logic
-
-.PARAMETER Mode
-Specifies the operation mode (Export, Import, ShowManifest).
-
-.PARAMETER Path
-Path to the backup folder or ZIP file.
+v1.1.1 (2026-03-14) - Added console path fallback, netsh zero-profile check, and zip support for ShowManifest
 #>
 
 param(
@@ -27,8 +22,13 @@ param(
     [string]$Mode,
 
     [Parameter(Mandatory=$false)]
-    [string]$Path = $PSScriptRoot
+    [string]$Path
 )
+
+# Fallback to current directory if run interactively in the console
+if (-not $Path) {
+    $Path = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+}
 
 # ---------------------------------------------------------
 # Admin Check
@@ -47,16 +47,23 @@ switch ($Mode) {
         try {
             $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm"
             $tempFolder = Join-Path $env:TEMP "WifiBackup_$timestamp"
-            $finalZip = Join-Path $PSScriptRoot "WifiBackup_$timestamp.zip"
+            $finalZip = Join-Path $Path "WifiBackup_$timestamp.zip"
 
             New-Item -ItemType Directory -Path $tempFolder -Force | Out-Null
             
             write-host "exporting profiles..." -ForegroundColor Cyan
             netsh wlan export profile key=clear folder="$tempFolder" | Out-Null
 
+            $xmlFiles = Get-ChildItem "$tempFolder\*.xml"
+            if ($xmlFiles.Count -eq 0) {
+                write-warning "no wifi profiles found on this system to export."
+                Remove-Item -Recurse -Force $tempFolder
+                return
+            }
+
             # metadata
             $manifestPath = Join-Path $tempFolder "manifest.txt"
-            $count = (Get-ChildItem "$tempFolder\*.xml").Count
+            $count = $xmlFiles.Count
             
             @"
 WiFi Backup Manifest
@@ -81,7 +88,7 @@ Profiles: $count
 
         try {
             $workPath = $Path
-            $isZip = $Path.EndsWith(".zip")
+            $isZip = $Path.EndsWith(".zip", [System.StringComparison]::OrdinalIgnoreCase)
 
             if ($isZip) {
                 $workPath = Join-Path $env:TEMP "WifiImport_Temp"
@@ -106,11 +113,31 @@ Profiles: $count
     }
 
     "ShowManifest" {
-        $manifestFile = Join-Path $Path "manifest.txt"
+        $manifestFile = ""
+        $tempManifestDir = ""
+        $isZip = $Path.EndsWith(".zip", [System.StringComparison]::OrdinalIgnoreCase)
+
+        if ($isZip) {
+            if (-not (Test-Path $Path)) {
+                write-warning "zip file not found at $Path"
+                return
+            }
+            $tempManifestDir = Join-Path $env:TEMP "WifiManifest_Temp"
+            if (Test-Path $tempManifestDir) { Remove-Item -Recurse -Force $tempManifestDir }
+            Expand-Archive -Path $Path -DestinationPath $tempManifestDir
+            $manifestFile = Join-Path $tempManifestDir "manifest.txt"
+        } else {
+            $manifestFile = Join-Path $Path "manifest.txt"
+        }
+
         if (Test-Path $manifestFile) {
             Get-Content $manifestFile
         } else {
-            write-warning "no manifest.txt found at $Path"
+            write-warning "no manifest.txt found."
+        }
+
+        if ($tempManifestDir -and (Test-Path $tempManifestDir)) {
+            Remove-Item -Recurse -Force $tempManifestDir
         }
     }
 }
