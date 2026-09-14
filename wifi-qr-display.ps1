@@ -4,17 +4,15 @@ Display a Wi-Fi QR code for a network from a wifi-backup.ps1 backup.
 
 .DESCRIPTION
 Reads a Wi-Fi backup folder, parses the XML for credentials, 
-and generates a QR code via Google Chart API.
+and generates a QR code via QuickChart API.
 
 .AUTHOR
-Scott M.
+Scott Malin, CISSP
 
 .CHANGELOG
 v1.0.0 (2026-03-12) - Initial version
 v1.1.0 (2026-03-12) - Added internet check, fixed loop syntax, and added Changelog
-
-.PARAMETER Path
-Path to the backup folder or ZIP file.
+v1.1.1 (2026-09-14) - Switched from Google Chart API to QuickChart.io
 #>
 
 param(
@@ -30,9 +28,9 @@ if (-not (Test-Path $Path)) {
     exit
 }
 
-# check for web access since we're using Google's API
-if (-not (Test-Connection -ComputerName google.com -Count 1 -Quiet)) {
-    Write-Error "this script needs internet to generate the QR code via Google API."
+# check for web access since we're using QuickChart API
+if (-not (Test-Connection -ComputerName quickchart.io -Count 1 -Quiet)) {
+    Write-Error "this script needs internet to generate the QR code."
     exit
 }
 
@@ -80,7 +78,7 @@ $wifiString = "WIFI:T:$type;S:$ssid;P:$pass;;"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-$qrUrl = "https://chart.googleapis.com/chart?chs=350x350&cht=qr&chl=$([uri]::EscapeDataString($wifiString))"
+$qrUrl = "https://quickchart.io/chart?chs=350x350&cht=qr&chl=$([uri]::EscapeDataString($wifiString))"
 
 $form = New-Object Windows.Forms.Form
 $form.Text = "QR Code: $ssid"
