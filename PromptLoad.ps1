@@ -10,12 +10,13 @@
 
 .NOTES
     Author: Scott M.
-    Date: 2026-02-24
+    Initial Date: 2026-02-24
 
 .CHANGELOG
     v1.0 (2026-02-24) - Initial build.
     v1.1 (2026-02-24) - Switched from Out-GridView to console menu.
     v1.2 (2026-02-24) - Updated menu to start at 1, added 0 for exit.
+    v1.2.1 (2026-09-14) - Fixed string comparison bug and cleaned up hidden characters.
 #>
 
 # find files
@@ -46,12 +47,16 @@ if ($choice -eq "0" -or -not $choice) {
 }
 
 # validate and copy
-if ($choice -match '^\d+$' -and $choice -le $files.Count -and $choice -gt 0) {
-    $index = [int]$choice - 1
-    $target = $files[$index]
-    
-    Get-Content $target.FullName | Set-Clipboard
-    echo "`nsuccess: $($target.Name) is now in your paste buffer."
+if ($choice -match '^\d+$') {
+    $num = [int]$choice
+    if ($num -le $files.Count -and $num -gt 0) {
+        $target = $files[$num - 1]
+        
+        Get-Content $target.FullName | Set-Clipboard
+        echo "`nsuccess: $($target.Name) is now in your paste buffer."
+    } else {
+        echo "`ninvalid choice. try again."
+    }
 } else {
     echo "`ninvalid choice. try again."
 }
