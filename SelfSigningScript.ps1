@@ -6,8 +6,10 @@
         Automates cert creation, trusted root storage, and signing. 
         Uses a temp workspace to bypass OneDrive sync locks.
     .NOTES
-        Author: Scott M.
+        Author: Scott Malin, CISSP
         Updated: 2026-03-11
+    .CHANGELOG
+        v1.0.0 - 2026-03-11 - Initial release with temp workspace, auto-cert creation, and root store handling.
     #>
     [CmdletBinding()]
     param(
@@ -48,7 +50,6 @@
         $FileName = Split-Path $Path -Leaf
 
         # --- CERTIFICATE HANDLING ----------------------------------------------------
-        # Look specifically for the cert we created
         $Cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | 
                 Where-Object { $_.Subject -eq $SubjectName } |
                 Sort-Object NotAfter -Descending | Select-Object -First 1
@@ -56,7 +57,6 @@
         if (-not $Cert) {
             Write-Host "First-run setup: Creating '$PCName-Signer'..." -ForegroundColor Cyan
             
-            # Create cert with specific Code Signing OID (1.3.6.1.5.5.7.3.3)
             $Cert = New-SelfSignedCertificate -Type CodeSigningCert `
                     -Subject $SubjectName `
                     -HashAlgorithm "SHA256" `
@@ -65,7 +65,6 @@
                     -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3") `
                     -NotAfter (Get-Date).AddYears(5)
 
-            # Move to Trusted Root so the PC trusts itself
             $rootStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "CurrentUser")
             $rootStore.Open("ReadWrite")
             $rootStore.Add($Cert)
