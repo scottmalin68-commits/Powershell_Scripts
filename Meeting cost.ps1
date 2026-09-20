@@ -8,22 +8,25 @@
     and print a stylized summary report when the meeting ends.
 
 .CHANGELOG
-    v1.3.0 - 2026-08-08 - Scott Malin
+    v1.3.1 - 2026-09-20 - Scott Malin, CISSP
+    - switched cost calculation to smooth fractional minutes for real-time second-by-second updates.
+
+    v1.3.0 - 2026-08-08 - Scott Malin, CISSP
     - updated live screen display to list tangent topics under the main subject
 
-    v1.2.1 - 2026-08-08 - Scott Malin
+    v1.2.1 - 2026-08-08 - Scott Malin, CISSP
     - fixed dollar sign variable expansion bug in setup cheat sheet
     - expanded cheat sheet range from $50k to $250k in $25k increments
 
-    v1.2.0 - 2026-08-08 - Scott Malin
+    v1.2.0 - 2026-08-08 - Scott Malin, CISSP
     - clarified hourly rate prompt during setup
     - added salary-to-hourly reference lookup table in setup screen
 
-    v1.1.0 - 2026-08-07 - Scott Malin
+    v1.1.0 - 2026-08-07 - Scott Malin, CISSP
     - added ANSI colors and formatted banners for better visual contrast
     - added color coding for cost thresholds and status alerts
     
-    v1.0.0 - 2026-08-07 - Scott Malin
+    v1.0.0 - 2026-08-07 - Scott Malin, CISSP
     - initial release
     - real-time cost calculation based on rate and participant count
     - live key controls for participant updates (A/R) and side topics (T)
@@ -43,7 +46,7 @@
 # clear screen and show start header
 Clear-Host
 Write-Host "========================================" -ForegroundColor Magenta
-Write-Host "     MEETING COST TRACKER SETUP        " -ForegroundColor Cyan
+Write-Host "      MEETING COST TRACKER SETUP        " -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Magenta
 
 # display hourly rate conversion table
@@ -68,26 +71,22 @@ $subject = Read-Host "Enter meeting subject"
 [double]$hourlyRate = Read-Host "Enter average HOURLY cost per person ($/hr)"
 
 # initialize meeting state and log history
-$startTime = Get-Date
-$subjects = [System.Collections.Generic.List[string]]::new()
+$startTime = Get-Date$subjects = [System.Collections.Generic.List[string]]::new()
 $subjects.Add($subject)
 
-$history = [System.Collections.Generic.List[psobject]]::new()
-$history.Add([PSCustomObject]@{
+$history = [System.Collections.Generic.List[psobject]]::new()$history.Add([PSCustomObject]@{
     Time = $startTime.ToString("HH:mm:ss")
     Event = "Meeting started with $participants participants"
 })
 
-$running = $true
+$running = $true$currentCost = 0.0
 
 # main display and tracking loop
 while ($running) {
-    $elapsed = (Get-Date) - $startTime
-    $totalMinutes = [math]::Max(1, [math]::Floor($elapsed.TotalMinutes))
+    $elapsed = (Get-Date) -$startTime
     
-    # calculate total cost based on participant hours
-    $perMinuteRate = ($hourlyRate / 60) * $participants
-    $currentCost = $perMinuteRate * $totalMinutes
+    # calculate total cost smoothly using fractional minutes
+    $perMinuteRate = ($hourlyRate / 60) * $participants$currentCost = $perMinuteRate * $elapsed.TotalMinutes
 
     # refresh screen with colorized stats
     Clear-Host
@@ -113,8 +112,7 @@ while ($running) {
     
     Write-Host " Running Cost: " -NoNewline
     # shift color based on total cost spent
-    if ($currentCost -gt 250) {
-        Write-Host "`$$([math]::Round($currentCost, 2))" -ForegroundColor Red
+    if ($currentCost -gt 250) {         Write-Host "`$$([math]::Round($currentCost, 2))" -ForegroundColor Red
     } elseif ($currentCost -gt 100) {
         Write-Host "`$$([math]::Round($currentCost, 2))" -ForegroundColor Yellow
     } else {
@@ -138,16 +136,14 @@ while ($running) {
         $key = [console]::ReadKey($true).Key
         switch ($key) {
             'A' {
-                $participants++
-                $history.Add([PSCustomObject]@{
+                $participants++$history.Add([PSCustomObject]@{
                     Time = (Get-Date).ToString("HH:mm:ss")
                     Event = "Added participant (Total: $participants)"
                 })
             }
             'R' {
                 if ($participants -gt 1) {
-                    $participants--
-                    $history.Add([PSCustomObject]@{
+                    $participants--$history.Add([PSCustomObject]@{
                         Time = (Get-Date).ToString("HH:mm:ss")
                         Event = "Removed participant (Total: $participants)"
                     })
@@ -178,7 +174,7 @@ while ($running) {
 $endTime = Get-Date
 Clear-Host
 Write-Host "==========================================" -ForegroundColor Green
-Write-Host "             FINAL MEETING REPORT         " -ForegroundColor DarkGreen
+Write-Host "            FINAL MEETING REPORT          " -ForegroundColor DarkGreen
 Write-Host "==========================================" -ForegroundColor Green
 
 Write-Host " Start Time:     " -NoNewline
@@ -203,8 +199,8 @@ foreach ($s in $subjects) {
 }
 
 Write-Host "`n Timeline Log:" -ForegroundColor Cyan
-foreach ($item in $history) {
-    Write-Host "  [$($item.Time)] " -ForegroundColor DarkGray -NoNewline
+foreach ($item in$history) {
+    Write-Host "   [$($item.Time)] " -ForegroundColor DarkGray -NoNewline
     Write-Host "$($item.Event)" -ForegroundColor White
 }
 Write-Host "==========================================" -ForegroundColor Green
